@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
 
 
   vector<string> zip_fns;
-  ListSubDir(zip_dir.c_str(), zip_fns);
+  ListDirFile(zip_dir.c_str(), "saz", zip_fns);
 
   CHECK_GT(zip_fns.size(), 0) << "no zip file under dir: " << zip_dir;
 
