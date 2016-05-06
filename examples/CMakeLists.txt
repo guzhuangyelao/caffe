@@ -1,12 +1,17 @@
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 ")
 
-SET(LOCAL_LIB /home/chenglong/local/libzip-1.1.2/lib/libzip.so)
-set(ZIP_INCLUDE_DIR /home/chenglong/local/libzip-1.1.2/include)
+# use for tts pc
+#SET(LOCAL_LIB /home/chenglong/local/libzip-1.1.2/lib/libzip.so)
+#set(ZIP_INCLUDE_DIR /home/chenglong/local/libzip-1.1.2/include)
+
+# use for dell
+SET(LOCAL_LIB /usr/local/lib/libzip.so)
 set(source_file ${PROJECT_SOURCE_DIR}/examples/12306/convert_saz_siamese_data.cpp)
 
 set(util_files
   ${PROJECT_SOURCE_DIR}/examples/12306/util/jsoncpp.cpp
+  ${PROJECT_SOURCE_DIR}/examples/12306/util/fileutil.cpp
   ${PROJECT_SOURCE_DIR}/examples/12306/util/base64.cpp)
 
 #foreach(source_file ${examples_srcs})

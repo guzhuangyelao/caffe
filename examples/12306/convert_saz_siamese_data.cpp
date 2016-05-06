@@ -11,6 +11,7 @@
 #include <fstream>
 #include <leveldb/db.h>
 #include <unordered_set>
+#include <hdf5.h>
 
 #include "caffe/proto/caffe.pb.h"
 #include "caffe/util/format.hpp"
@@ -18,12 +19,16 @@
 
 #include "util/json/json.h"
 #include "util/base64.h"
+#include "util/fileutil.h"
 
 const int ORIGIN_IMG_WIDTH = 293;
 const int ORIGIN_IMG_HEIGHT = 190;
 const int PIC_SIZE = 67;
-const int TXT_WIDTH = 64;
+const int SIZE_OF_PIC = 3 * PIC_SIZE * PIC_SIZE;
+const int TXT_WIDTH = 67;
 const int TXT_HEIGHT = 25;
+
+const float TRAIN_RATIO = 0.8;
 
 using namespace std;
 
@@ -110,9 +115,9 @@ int parse_label(const string &label_str, unordered_set<int> &labels) {
   if (infos.size() % 2 != 0) {
     return -1;
   }
-  for (unsigned int i = 0; i < infos.size()/2; i++) {
+  for (unsigned int i = 0; i < infos.size() / 2; i++) {
     auto x_s = infos[i];
-    auto y_s = infos[i+1];
+    auto y_s = infos[i + 1];
     boost::trim_if(x_s, boost::is_any_of("()"));
     boost::trim_if(y_s, boost::is_any_of("()"));
     int x = atoi(x_s.c_str());
@@ -145,8 +150,8 @@ int extract_labels_info(zip_file_t *zip_f_p, unordered_set<int> &labels) {
 
   Json::Value value;
   Json::Reader reader;
-  if (!reader.parse(lines[lines.size() - 2],value)) {
-    LOG(ERROR) << "parse data error! info: " << lines[lines.size()-2];
+  if (!reader.parse(lines[lines.size() - 2], value)) {
+    LOG(ERROR) << "parse data error! info: " << lines[lines.size() - 2];
     return -1;
   } else {
     if (!value.isMember("res")) {
@@ -164,7 +169,7 @@ int extract_labels_info(zip_file_t *zip_f_p, unordered_set<int> &labels) {
 }
 
 int load_image(const string &img_buf, cv::Mat &img) {
-  cv::Mat data(1, img_buf.length(), CV_8UC1, (char*)img_buf.c_str());
+  cv::Mat data(1, img_buf.length(), CV_8UC1, (char *) img_buf.c_str());
   img = cv::imdecode(data, CV_LOAD_IMAGE_COLOR);
   return 0;
 }
@@ -178,6 +183,7 @@ uint32_t swap_endian(uint32_t val) {
   return (val << 16) | (val >> 16);
 }
 
+/*
 void convert_dataset(const char* image_filename, const char* label_filename,
                      const char* db_filename) {
   // Open files
@@ -250,6 +256,46 @@ void convert_dataset(const char* image_filename, const char* label_filename,
   delete db;
   delete [] pixels;
 }
+ */
+
+int db_init(const string &db_filename, leveldb::DB **db) {
+  // Open leveldb
+  leveldb::Options options;
+  options.create_if_missing = true;
+  options.error_if_exists = true;
+  leveldb::Status status = leveldb::DB::Open(
+      options, db_filename, db);
+  CHECK(status.ok()) << "Failed to open leveldb " << db_filename
+      << ". Is it already existing?";
+  return 0;
+}
+
+int db_insert(leveldb::DB *db, caffe::Datum &datum, const cv::Mat &pic, const cv::Mat &txt, const int lable) {
+  return 0;
+}
+
+int create_hdf5_init(const string &filename, hid_t &pic_hid, hid_t &txt_hid, hid_t &lbl_hid) {
+  hid_t file_hid = H5Fcreate(filename.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT,
+                             H5P_DEFAULT);
+  CHECK_GE(file_hid, 0)
+    << "Couldn't open " << filename << " to save weights.";
+  pic_hid = H5Gcreate2(file_hid, "pic_data", H5P_DEFAULT, H5P_DEFAULT,
+                       H5P_DEFAULT);
+  CHECK_GE(pic_hid, 0) << "Error saving picture data to " << filename << ".";
+  txt_hid = H5Gcreate2(file_hid, "txt_data", H5P_DEFAULT, H5P_DEFAULT,
+                       H5P_DEFAULT);
+  CHECK_GE(txt_hid, 0) << "Error saving text_image data to " << filename << ".";
+  lbl_hid = H5Gcreate2(file_hid, "label", H5P_DEFAULT, H5P_DEFAULT,
+                       H5P_DEFAULT);
+  CHECK_GE(lbl_hid, 0) << "Error saving text_image data to " << filename << ".";
+  return 0;
+}
+
+//int hdf5_feed_data(const hid_t file_id, const cv::Mat &pic_img, const cv::Mat &txt_img, int label) {
+//
+//  hdf5_save_nd_dataset<Dtype>(layer_data_hid, dataset_name.str(),
+//                              *params_[net_param_id]);
+//}
 
 int main(int argc, char **argv) {
 
@@ -257,37 +303,80 @@ int main(int argc, char **argv) {
   FLAGS_logbufsecs = 0;
   google::SetStderrLogging(google::GLOG_INFO);
 
-  if (argc < 2) {
-    LOG(FATAL) << "useage: exe zip_fn";
+  if (argc < 4) {
+    LOG(FATAL) << "useage: exe zip_dir db_fn img_id_fn -train|test ";
     _exit(0);
   }
-  string zip_fn = argv[1];
+  string zip_dir = argv[1];
+  string db_filename = argv[2];
+  string id_filename = argv[3];
 
-  int err_code;
-  zip_t *z_p = zip_open(zip_fn.c_str(), ZIP_RDONLY, &err_code);
-  if (z_p == NULL) {
-    LOG(ERROR) << "open zip file: " << zip_fn << " error, code: " << err_code;
-    return -1;
+  bool is_train = true;
+  if (strcmp(argv[4], "-test") == 0) {
+    is_train = false;
   }
 
-  int file_num = zip_get_num_entries(z_p, 0);
-  int img_num = (file_num - 2) / 3;
-  LOG(INFO) << "find total " << file_num << " files in " << zip_fn;
-  for (auto i = 1; i <= img_num; i++) {
-    char img_arch_fn[30];
-    char lbl_arch_fn[30];
-    sprintf(img_arch_fn, "raw/%03d_c.txt", i);
-    sprintf(lbl_arch_fn, "raw/%03d_s.txt", i);
+  // pixel buf
+  char *pixels = new char[6 * PIC_SIZE * PIC_SIZE];
+  std::string value;
+
+  // prepare for datum
+  caffe::Datum datum;
+  datum.set_channels(6);
+  datum.set_height(PIC_SIZE);
+  datum.set_width(PIC_SIZE);
+
+  // init leveldb
+  leveldb::DB *db;
+  db_init(db_filename, &db);
+
+  // init itemid file
+  int itemid = 0;
+  ofstream fo(id_filename);
 
 
-    unordered_set<int> lbls;
-    zip_file_t *lbl_f_p = zip_fopen(z_p, lbl_arch_fn, 0);
-    if (extract_labels_info(lbl_f_p, lbls) < 0 || lbls.size() == 0) {
+  vector<string> zip_fns;
+  ListSubDir(zip_dir.c_str(), zip_fns);
+
+  CHECK_GT(zip_fns.size(), 0) << "no zip file under dir: " << zip_dir;
+
+  int train_num = zip_fns.size() * TRAIN_RATIO;
+  int beg_idx = is_train ? 0 : train_num;
+  int end_idx = is_train ? train_num : zip_fns.size();
+  int total_zip_num = end_idx - beg_idx;
+
+//  for (auto zip_fn : zip_fns) {
+  for (int idx = beg_idx; idx < end_idx; idx++) {
+    string zip_fn = zip_fns[idx];
+    int err_code;
+    zip_t *z_p = zip_open(zip_fn.c_str(), ZIP_RDONLY, &err_code);
+    if (z_p == NULL) {
+      LOG(ERROR) << "open zip file: " << zip_fn << " error, code: " << err_code;
       continue;
     }
 
-    zip_file_t *img_f_p = zip_fopen(z_p, img_arch_fn, 0);
-    if (img_f_p != NULL) {
+    int file_num = zip_get_num_entries(z_p, 0);
+    int img_num = (file_num - 2) / 3;
+    LOG(INFO) << "find total " << file_num << " files in " << zip_fn;
+    for (auto i = 1; i <= img_num; i++) {
+      char img_arch_fn[30];
+      char lbl_arch_fn[30];
+      sprintf(img_arch_fn, "raw/%03d_c.txt", i);
+      sprintf(lbl_arch_fn, "raw/%03d_s.txt", i);
+
+
+      unordered_set<int> lbls;
+      zip_file_t *lbl_f_p = zip_fopen(z_p, lbl_arch_fn, 0);
+      if (extract_labels_info(lbl_f_p, lbls) < 0 || lbls.size() == 0) {
+        continue;
+      }
+
+      zip_file_t *img_f_p = zip_fopen(z_p, img_arch_fn, 0);
+      if (img_f_p == NULL) {
+        LOG(ERROR) << "open zip archive file: " << img_arch_fn << " error!";
+        continue;
+      }
+
       string img_buf;
       if (extract_image(img_f_p, img_buf) < 0) {
         continue;
@@ -298,7 +387,15 @@ int main(int argc, char **argv) {
       LOG(INFO) << "img size: (" << img.rows << ", " << img.cols << ")";
       cv::imwrite("test1.jpg", img);
 
-      for(unsigned int lbl_idx = 0; lbl_idx < 8; lbl_idx++) {
+      cv::Mat txt_img, txt_rsz_img;
+      cv::Rect &txt_roi = ROI_RECT[8];
+      txt_img = img(txt_roi);
+      cv::resize(txt_img, txt_rsz_img, cv::Size(PIC_SIZE, PIC_SIZE));
+      cv::imwrite("resize.jpg", txt_rsz_img);
+
+      memcpy(pixels, txt_img.data, SIZE_OF_PIC);
+
+      for (unsigned int lbl_idx = 0; lbl_idx < 8; lbl_idx++) {
         cv::Rect &roi = ROI_RECT[lbl_idx];
         LOG(INFO) << roi.height << " " << roi.width;
         cv::Mat sub_img = img(roi);
@@ -307,48 +404,30 @@ int main(int argc, char **argv) {
         cv::imwrite(sub_img_fn, sub_img);
         LOG(INFO) << "sub image size: (" << sub_img.rows << ", " << sub_img.cols << ")";
 
-      }
-    } else {
-      LOG(ERROR) << "open zip archive file: " << img_arch_fn << " error!";
-    }
-    break;
+        memcpy(pixels + SIZE_OF_PIC, sub_img.data, SIZE_OF_PIC);
 
+        datum.set_data(pixels, 2 * SIZE_OF_PIC);
+        int label = 0;
+        if (lbls.find(lbl_idx) != lbls.end()) {
+          label = 1;
+        }
+        datum.set_label(label);
+        datum.SerializeToString(&value);
+        std::string key_str = caffe::format_int(itemid, 8);
+        db->Put(leveldb::WriteOptions(), key_str, value);
+
+        fo << key_str << "\t" << zip_fn << "\t" << lbl_idx << "\t" << label << endl;
+        itemid++;
+
+      }
+//      break;
+      LOG_EVERY_N(INFO, 10) << "process " << idx << "/" << total_zip_num << ", generate image number: " << itemid;
+
+    }
   }
 
-
-/*
-string test_arch_fn = "raw/002_c.txt";
-int ret = zip_name_locate(z_p, test_arch_fn.c_str(), ZIP_FL_ENC_GUESS);
-if (ret != 1) {
-  return -1;
-}
-zip_file_t *zip_f_p = zip_fopen(z_p, test_arch_fn.c_str(), ZIP_FL_UNCHANGED);
-
-string img_buf;
-if (extract_image(zip_f_p, img_buf) < 0) {
-  return -1;
-}
-
-cv::Mat img = cv::Mat(190, 293, CV_8UC3, (void *)img_buf.c_str());
-//  ofstream os("test.jpg", ios::binary);
-//  os.write(img_buf.c_str(), img_buf.length());
-//  os.close();
-LOG(INFO) << "image rows: " << img.rows << " cols: " << img.cols;
-
-string test_lbl_fn = "raw/001_s.txt";
-ret = zip_name_locate(z_p, test_lbl_fn.c_str(), ZIP_FL_ENC_GUESS);
-if (ret != 1) {
-  LOG(ERROR) << "archive file: " << test_lbl_fn << " not in zip file: " << zip_fn;
-  return -1;
-}
-zip_f_p = zip_fopen(z_p, test_lbl_fn.c_str(), ZIP_FL_UNCHANGED);
-string lbl_str;
-unordered_set<int> labels;
-if (extract_labels_info(zip_f_p, labels) < 0) {
-  LOG(ERROR) << "extract labels info error!";
-  return -1;
-}
-   */
+  delete db;
+  delete[] pixels;
 
   return 0;
 }
